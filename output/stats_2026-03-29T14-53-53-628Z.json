@@ -1,0 +1,26 @@
+{
+  "totalCourts": 40,
+  "extracted": 40,
+  "failedBatches": 0,
+  "totalPromptTokens": 4329,
+  "totalCompletionTokens": 3861,
+  "totalReasoningTokens": 3853,
+  "batchTimes": [
+    15421,
+    15107,
+    14406,
+    14508,
+    15291,
+    14910,
+    16093,
+    15449
+  ],
+  "totalTime": "2m 3s",
+  "totalTimeMs": 123221,
+  "avgBatchTime": "15.1s",
+  "courtsPerMinute": 19,
+  "url": "https://sudrf.ru/index.php?id=300&act=go_search&searchtype=fs&court_name=+++&court_subj=59&court_type=0&court_okrug=0&vcourt_okrug=0",
+  "model": "qwen_qwen3.5-4b@q4_k_m",
+  "batchSize": 5,
+  "timestamp": "2026-03-29T14:53:53.630Z"
+}
