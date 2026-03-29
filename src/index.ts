@@ -1,16 +1,15 @@
 import 'dotenv/config';
-import OpenAI from 'openai';
+import pLimit from 'p-limit';
 import fs from 'fs';
 import path from 'path';
 import { fetchPageHTML } from './browser.js';
 import { extractCourtBlocks, splitAddresses } from './extractor.js';
-import { extractWithLLM } from './llm.js';
+import { extractWithLLM, createLLMClient } from './llm.js';
 
-const BASE_URL = process.env.LM_STUDIO_BASE_URL!;
-const MODEL    = process.env.LM_STUDIO_MODEL!;
-const TARGET   = process.env.TARGET_URL!;
-const BATCH    = 5;
-const OUT_DIR  = 'output';
+const TARGET      = process.env.TARGET_URL!;
+const BATCH       = parseInt(process.env.LLM_BATCH_SIZE ?? '5');
+const CONCURRENCY = parseInt(process.env.LLM_CONCURRENCY ?? '1');
+const OUT_DIR     = 'output';
 
 function progress(current: number, total: number, label: string) {
   const pct = Math.round((current / total) * 100);
@@ -28,10 +27,13 @@ function formatDuration(ms: number): string {
 async function main() {
   const startTotal = Date.now();
 
+  const { client, model } = createLLMClient();
+
   console.log(`\n🚀 Agent-001 старт`);
   console.log(`🌐 URL: ${TARGET}`);
-  console.log(`🤖 Модель: ${MODEL}`);
-  console.log(`🗂  Размер батча: ${BATCH}\n`);
+  console.log(`🤖 Модель: ${model}`);
+  console.log(`🗂  Размер батча: ${BATCH}`);
+  console.log(`⚡ Concurrency: ${CONCURRENCY}\n`);
 
   if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR);
 
@@ -45,8 +47,6 @@ async function main() {
   console.log(`\n📋 Найдено судов: ${blocks.length}`);
   console.log(`🗂  Батчей: ${totalBatches}\n`);
 
-  const client = new OpenAI({ baseURL: BASE_URL, apiKey: 'lm-studio' });
-
   const results = [];
   const stats = {
     totalCourts: blocks.length,
@@ -58,16 +58,28 @@ async function main() {
     batchTimes: [] as number[],
   };
 
-  for (let i = 0; i < blocks.length; i += BATCH) {
-    const batchNum = Math.floor(i / BATCH) + 1;
-    const batch = blocks.slice(i, i + BATCH);
+  let completedBatches = 0;
+  const limit = pLimit(CONCURRENCY);
 
-    progress(batchNum - 1, totalBatches, `Батч ${batchNum}/${totalBatches}...`);
-    const tBatch = Date.now();
+  const batchTasks = Array.from({ length: totalBatches }, (_, idx) => {
+    const batchNum = idx + 1;
+    const batch = blocks.slice(idx * BATCH, idx * BATCH + BATCH);
 
-    const { result, usage } = await extractWithLLM(client, MODEL, batch, batchNum);
+    return limit(async () => {
+      const tBatch = Date.now();
+      const { result, usage } = await extractWithLLM(client, model, batch, batchNum);
+      const batchMs = Date.now() - tBatch;
 
-    const batchMs = Date.now() - tBatch;
+      completedBatches++;
+      progress(completedBatches, totalBatches, `Батч ${completedBatches}/${totalBatches} ✓ (${formatDuration(batchMs)})`);
+
+      return { result, usage, batch, batchMs };
+    });
+  });
+
+  const batchResults = await Promise.all(batchTasks);
+
+  for (const { result, usage, batch, batchMs } of batchResults) {
     stats.batchTimes.push(batchMs);
     stats.totalPromptTokens += usage.prompt;
     stats.totalCompletionTokens += usage.completion;
@@ -90,12 +102,10 @@ async function main() {
       stats.extracted += result.courts.length;
       results.push(...result.courts);
     }
-
-    progress(batchNum, totalBatches, `Батч ${batchNum}/${totalBatches} ✓ (${formatDuration(batchMs)})`);
   }
 
   const totalMs = Date.now() - startTotal;
-  const avgBatchMs = stats.batchTimes.reduce((a, b) => a + b, 0) / stats.batchTimes.length;
+  const avgBatchMs = stats.batchTimes.reduce((a: number, b: number) => a + b, 0) / stats.batchTimes.length;
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const outFile = path.join(OUT_DIR, `courts_${timestamp}.json`);
@@ -109,8 +119,9 @@ async function main() {
     avgBatchTime: formatDuration(avgBatchMs),
     courtsPerMinute: Math.round((stats.extracted / totalMs) * 60_000),
     url: TARGET,
-    model: MODEL,
+    model,
     batchSize: BATCH,
+    concurrency: CONCURRENCY,
     timestamp: new Date().toISOString(),
   };
   fs.writeFileSync(statsFile, JSON.stringify(fullStats, null, 2), 'utf-8');

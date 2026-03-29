@@ -18,35 +18,51 @@ const EMPTY: LLMResponse = {
   usage: { prompt: 0, completion: 0, reasoning: 0 }
 };
 
+export function createLLMClient(): { client: OpenAI; model: string } {
+  if (process.env.LLM_PROVIDER === 'cloud') {
+    return {
+      client: new OpenAI({
+        apiKey: process.env.LLM_CLOUD_API_KEY!,
+        baseURL: process.env.LLM_CLOUD_BASE_URL,
+      }),
+      model: process.env.LLM_CLOUD_MODEL ?? 'qwen/qwen3.5-flash',
+    };
+  }
+
+  return {
+    client: new OpenAI({
+      apiKey: 'lm-studio',
+      baseURL: process.env.LLM_LOCAL_BASE_URL ?? 'http://localhost:1234/v1',
+    }),
+    model: process.env.LLM_LOCAL_MODEL ?? 'qwen3-4b',
+  };
+}
+
 export async function extractWithLLM(
   client: OpenAI,
   model: string,
   blocks: CourtBlock[],
   batchIndex: number
 ): Promise<LLMResponse> {
-  const userContent = blocks
+  const isCloud = process.env.LLM_PROVIDER === 'cloud';
+  const enableThinking = process.env.LLM_ENABLE_THINKING === 'true';
+
+  const userContent = `/no_think\n` + blocks
     .map(b => `CODE: ${b.code}\nNAME: ${b.name}\nADDRESS: ${b.rawAddress}\nWEBSITE: ${b.website ?? ''}`)
     .join('\n---\n');
 
-const response = await client.chat.completions.create({
-  model,
-  temperature: 0,
-  max_tokens: 2048,
-  // @ts-ignore — LM Studio extension
-  reasoning: 'off',
-  response_format: {
-    type: 'json_schema',
-    json_schema: {
-      name: 'courts',
-      strict: true,
-      schema: courtSchema
-    }
-  },
-  messages: [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: userContent }
-  ]
-});
+  const response = await client.chat.completions.create({
+    model,
+    temperature: 0,
+    max_tokens: 2048,
+    ...(isCloud && { extra_body: { enable_thinking: enableThinking } }),
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userContent }
+    ]
+  });
+
   const choice = response.choices[0];
   const finishReason = choice.finish_reason;
   const message = choice.message as {
@@ -72,7 +88,19 @@ const response = await client.chat.completions.create({
   }
 
   try {
-    return { result: JSON.parse(raw) as ExtractionResult, usage };
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return { result: { courts: parsed }, usage };
+    }
+    if (Array.isArray(parsed?.courts)) {
+      return { result: parsed as ExtractionResult, usage };
+    }
+    if (parsed?.code && parsed?.name) {
+      return { result: { courts: [parsed] }, usage };
+    }
+    console.error(`\n  ❌ Батч ${batchIndex}: неожиданная структура ответа`);
+    console.error(`  Raw (первые 500): ${raw.slice(0, 500)}`);
+    return { ...EMPTY, usage };
   } catch (e) {
     console.error(`\n  ❌ Батч ${batchIndex}: невалидный JSON`);
     console.error(`  Raw (первые 500 символов): ${raw.slice(0, 500)}`);
